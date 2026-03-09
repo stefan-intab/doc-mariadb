@@ -5,17 +5,23 @@ mariadb  Ver 15.1 Distrib 10.10.7-MariaDB, for debian-linux-gnu (x86_64) using  
 
 #### Add MariaDB repo to APT
 
-Pin to version 10.10.7:
-```bash
-curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version=mariadb-10.10.7
-```
-
-DOES NOT EXIST!
+>Currently there is limited support of MariaDB for Debian 13, use Debian 12 for now!
 
 ```bash
 curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version=mariadb-10.11
 ```
 
+Try 11.8:
+
+```bash
+curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version=mariadb-11.8
+```
+
+### Install MariaBD
+
+```bash
+sudo apt install mariadb-server mariadb-client
+```
 
 
 ### Restore volume
@@ -52,7 +58,7 @@ You need a database data volume
 
 
 ----
-### Restore backup
+### Restore FULL backup
 
 Run database restore using tmux (or similar).
 ```bash
@@ -72,6 +78,27 @@ Notes:
 - With syntax above pv shows the compressed size
 - Streaming is faster than decompressing to sql file and reading a 15-20x larger file
 - 
+
+----
+### Restore structure, tables and 1 week of ws_sensor_data
+
+
+
+
+----
+### Handle errors
+
+One solution: **Start from scratch**
+
+Stop DB: `sudo systemctl stop mariadb`
+Remove all DB files`sudo rm -rf /mnt/data/mysql/*`
+Reinitialize: `sudo mariadb-install-db --user=mysql --datadir=/mnt/data/mysql`
+or possibly: `sudo mysqld --initialize-insecure --user=mysql --datadir=/mnt/data/mysql`
+
+Start MariaDB: `sudo systemctl start mariadb`
+
+Test login: `mariadb -uroot`
+List databases: `SHOW DATABASES;`
 
 
 ----

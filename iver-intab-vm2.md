@@ -1,8 +1,22 @@
+## Restoring a DB server similar to intab-vm2 on Iver
+
 
 ### Version
-mariadb  Ver 15.1 Distrib 10.10.7-MariaDB, for debian-linux-gnu (x86_64) using  EditLine wrapper
 
 
+
+### Setup timezone
+Old intabcloud source code seems to be compatible when DB-server has local TZ configured.
+
+Set time zone to CET/CEST:
+```bash
+timedatectl set-timezone Europe/Stockholm
+```
+
+>If MariaDB is already installed and running, you need to restart it
+
+
+----
 #### Add MariaDB repo to APT
 
 >Currently there is limited support of MariaDB for Debian 13, use Debian 12 for now!
@@ -17,14 +31,48 @@ Try 11.8:
 curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version=mariadb-11.8
 ```
 
-### Install MariaBD
+-----
+#### Install MariaBD
 
 ```bash
 sudo apt install mariadb-server mariadb-client
 ```
 
+----
+#### Setup MariaDB Config
 
-### Restore volume
+In this repository there is a file: `mariadb.conf` 
+Copy the content and paste it into a new file on server:
+
+```bash
+nano /etc/mysql/mariadb.conf.d/70-intab.cnf
+```
+
+To activate it: 
+
+```bash
+sudo systemctl restart mariadb
+sudo systemctl status mariadb
+mariadbd --help --verbose | head -n 30
+```
+
+----
+#### Verify time zone
+
+```sql
+SELECT 
+  @@system_time_zone,
+  @@global.time_zone,
+  @@session.time_zone,
+  NOW(),
+  UTC_TIMESTAMP(),
+  TIMEDIFF(NOW(), UTC_TIMESTAMP());
+```
+q
+
+
+----
+#### Restore volume
 
 You need to restore your data to a volume on the VPS
 
@@ -37,10 +85,9 @@ rclone copy digitalocean:intabcloud-db-backups/backup/archive/full-intabcloud-ba
 ```
 
 ----
+#### Data volume
 
-### Data volume
-
-You need a database data volume
+You probably need a database data volume large enough to handle restoring data
 
 1. Create volume
 2. Mount it as /mnt/data
@@ -58,7 +105,10 @@ You need a database data volume
 
 
 ----
-### Restore FULL backup
+### Restore
+
+
+#### Restore FULL backup
 
 Run database restore using tmux (or similar).
 ```bash
@@ -70,7 +120,7 @@ Restore compressed full database backup file by streaming. It should create the 
 Execute from where backup is located:
 
 ```bash
-pv full-intabcloud-backup_20260301.sql.gz | zcat | mariadb -uroot
+pv full-intabcloud-backup_20260321.sql.zst | zstdcat | mariadb -uroot
 ```
 
 Notes:
@@ -80,7 +130,7 @@ Notes:
 - 
 
 ----
-### Restore structure, tables and 1 week of ws_sensor_data
+#### Restore structure, tables and 1 week of ws_sensor_data
 
 
 
@@ -103,24 +153,99 @@ List databases: `SHOW DATABASES;`
 
 ----
 
-To restore into on a new database server: 
+## Restore into on a new database server (Partial) 
 
-1. Install MariaDB
+1. Setup volumes
+For old intabcloud - about 1.5 TB is needed:
+Follow steps for creating a network volume for `/mnt/data`
 
-2. Create database: 
-2.1 Use sudo mysql -uroot -p
-2.2 (In SQL): CREATE DATABASE intabcloud;
+2. Install MariaDB
 
-1. Move backup files to DB server using 'scp'
+3. Copy backups to VPS using rclone
 
-2. Restore data:
-4.1 (In bash): gunzip -c structure_20241211.sql.gz | mysql -uroot -p intabcloud
-4.2 (In bash): gunzip -c small-tables_20241211.sql.gz | mysql -uroot -p --init-command="SET FOREIGN_KEY_CHECKS = 0;" intabcloud
-4.3 (In bash): gunzip -c large-tables_20241211.sql.gz | mysql -uroot -p intabcloud
-4.4 (In bash): gunzip -c ws_sensor_data-1w_20241211.sql.gz | mysql -uroot -p intabcloud
-# In some environments will gunzip without -c just unpack file. With -c data is always sent to "|"
-# FOREIGN_KEY_CHECKS is normally included in SQL-dump but not with --compact
+4. Restore database to VPS
 
-1. Server can go live
-2. Restore full backup on another server and dump the ws_sensor data you need
-3. Import that dump on server
+**Create database**
+
+```bash
+# Login
+sudo mariadb -uroot -p
+```
+
+```sql
+CREATE DATABASE intabcloud;
+```
+
+**Restore DB structure**
+```bash
+zstd -dc packed-file.sql.zst | mariadb -uroot -p intabcloud
+# or
+zstdcat packed-file.sql.zst | mariadb -uroot -p intabcloud
+```
+
+**Restore small tables**
+```bash
+zstdcat small-tables_xxxxxxxxxx.sql.zst | mariadb -uroot -p --init-command="SET FOREIGN_KEY_CHECKS = 0;" intabcloud
+```
+
+**Restore large tables**
+```bash
+zstdcat large-tables_xxxxxxxxxx.sql.zst | mariadb -uroot -p intabcloud
+```
+
+**Restore large tables**
+```bash
+zstdcat ws_sensor_data-1w_xxxxxxxxxx.sql.zst | mariadb -uroot -p intabcloud
+```
+> Note: use zstdcat or zstd -dc (decompress and (c) to stdout so it can be piped to mariadb)
+
+1. Setup users 
+
+Add intabadmin as non-sudo user (will run backups rclone etc):
+```bash
+sudo adduser intabadmin
+```
+cd .
+**Store password in Bitwarden**
+
+Also add sudo user(s) with ssh key
+
+**/mnt/backup** should be owned by intabadmin
+**crontab scripts** for sqldump should be executed by intabadmin
+
+----
+
+**Create SQL users:**
+Login to MariaDB:
+`mariadb -uroot -p`
+
+```sql
+-- Create user for apache/php
+CREATE USER IF NOT EXISTS 'intabcloud'@'10.110.0.%' IDENTIFIED BY 'intabcloud';
+GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON intabcloud.* TO 'intabcloud'@'10.110.0.%';
+
+-- Backup user (socket)
+CREATE USER IF NOT EXISTS 'backup'@'localhost' IDENTIFIED BY 'backup';
+GRANT
+  SELECT,                 -- read all tables
+  SHOW VIEW,              -- dump views
+  EVENT,                  -- dump events
+  TRIGGER,                -- dump triggers
+  -- PROCESS,                -- read metadata; not needed?
+  -- RELOAD,                 -- FLUSH TABLES; not needed?
+  -- LOCK TABLES,            -- for --lock-tables; not needed?
+  SHOW DATABASES         -- list all databases
+ON *.* TO 'backup'@'localhost';
+
+-- Account to for remote usage (through ssh)
+CREATE USER 'readonly'@'127.0.0.1' IDENTIFIED BY 'readonly';
+GRANT SELECT, TRIGGER, SHOW VIEW ON intabcloud.* TO 'readonly'@'127.0.0.1';
+
+FLUSH PRIVILEGES;
+```
+
+6. Server can go live
+7. Restore full backup on another server and dump the ws_sensor data you need
+8. Import that dump on server
+
+
